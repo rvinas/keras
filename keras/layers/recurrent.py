@@ -14,8 +14,10 @@ from .. import initializers
 from .. import regularizers
 from .. import constraints
 from ..engine.base_layer import Layer
+from ..engine.base_layer import disable_tracking
 from ..engine.base_layer import InputSpec
 from ..utils.generic_utils import has_arg
+from ..utils.generic_utils import to_list
 
 # Legacy support.
 from ..legacy.layers import Recurrent
@@ -254,7 +256,7 @@ class RNN(Layer):
                 for the cell, the value will be inferred by the first element
                 of the `state_size`.
             It is also possible for `cell` to be a list of RNN cell instances,
-            in which cases the cells get stacked on after the other in the RNN,
+            in which cases the cells get stacked one after the other in the RNN,
             implementing an efficient stacked RNN.
         return_sequences: Boolean. Whether to return the last output
             in the output sequence, or the full sequence.
@@ -292,7 +294,8 @@ class RNN(Layer):
     # Output shape
         - if `return_state`: a list of tensors. The first tensor is
             the output. The remaining tensors are the last states,
-            each with shape `(batch_size, units)`.
+            each with shape `(batch_size, units)`. For example, the number of
+            state tensors is 1 (for RNN and GRU) or 2 (for LSTM).
         - if `return_sequences`: 3D tensor with shape
             `(batch_size, timesteps, units)`.
         - else, 2D tensor with shape `(batch_size, units)`.
@@ -405,7 +408,7 @@ class RNN(Layer):
                              '(tuple of integers, '
                              'one integer per RNN state).')
         super(RNN, self).__init__(**kwargs)
-        self.cell = cell
+        self._set_cell(cell)
         self.return_sequences = return_sequences
         self.return_state = return_state
         self.go_backwards = go_backwards
@@ -418,6 +421,13 @@ class RNN(Layer):
         self._states = None
         self.constants_spec = None
         self._num_constants = None
+
+    @disable_tracking
+    def _set_cell(self, cell):
+        # This is isolated in its own method in order to use
+        # the disable_tracking decorator without altering the
+        # visible signature of __init__.
+        self.cell = cell
 
     @property
     def states(self):
@@ -536,6 +546,7 @@ class RNN(Layer):
 
         additional_inputs = []
         additional_specs = []
+
         if initial_state is not None:
             kwargs['initial_state'] = initial_state
             additional_inputs += initial_state
@@ -566,6 +577,10 @@ class RNN(Layer):
             # Perform the call with temporarily replaced input_spec
             original_input_spec = self.input_spec
             self.input_spec = full_input_spec
+            if 'initial_state' in kwargs:
+                kwargs.pop('initial_state')
+            if 'constants' in kwargs:
+                kwargs.pop('constants')
             output = super(RNN, self).__call__(full_input, **kwargs)
             self.input_spec = original_input_spec
             return output
@@ -578,19 +593,37 @@ class RNN(Layer):
              training=None,
              initial_state=None,
              constants=None):
+        if not isinstance(initial_state, (list, tuple, type(None))):
+            initial_state = [initial_state]
+        if not isinstance(constants, (list, tuple, type(None))):
+            constants = [constants]
         # input shape: `(samples, time (padded with zeros), input_dim)`
         # note that the .build() method of subclasses MUST define
         # self.input_spec and self.state_spec with complete input shapes.
         if isinstance(inputs, list):
-            # get initial_state from full input spec
-            # as they could be copied to multiple GPU.
-            if self._num_constants is None:
-                initial_state = inputs[1:]
+            if len(inputs) == 1:
+                inputs = inputs[0]
             else:
-                initial_state = inputs[1:-self._num_constants]
-            if len(initial_state) == 0:
-                initial_state = None
-            inputs = inputs[0]
+                # get initial_state from full input spec
+                # as they could be copied to multiple GPU.
+                if self._num_constants is None:
+                    if initial_state is not None:
+                        raise ValueError('Layer was passed initial state ' +
+                                         'via both kwarg and inputs list)')
+                    initial_state = inputs[1:]
+                else:
+                    if initial_state is not None and inputs[1:-self._num_constants]:
+                        raise ValueError('Layer was passed initial state ' +
+                                         'via both kwarg and inputs list')
+                    initial_state = inputs[1:-self._num_constants]
+                    if constants is None:
+                        constants = inputs[-self._num_constants:]
+                    elif len(inputs) > 1 + len(initial_state):
+                        raise ValueError('Layer was passed constants ' +
+                                         'via both kwarg and inputs list)')
+                if len(initial_state) == 0:
+                    initial_state = None
+                inputs = inputs[0]
         if initial_state is not None:
             pass
         elif self.stateful:
@@ -606,11 +639,12 @@ class RNN(Layer):
                              ' states but was passed ' +
                              str(len(initial_state)) +
                              ' initial states.')
+
         input_shape = K.int_shape(inputs)
         timesteps = input_shape[1]
-        if self.unroll and timesteps in [None, 1]:
+        if self.unroll and timesteps is None:
             raise ValueError('Cannot unroll a RNN if the '
-                             'time dimension is undefined or equal to 1. \n'
+                             'time dimension is undefined. \n'
                              '- If using a Sequential model, '
                              'specify the time dimension by passing '
                              'an `input_shape` or `batch_input_shape` '
@@ -664,10 +698,7 @@ class RNN(Layer):
                 state._uses_learning_phase = True
 
         if self.return_state:
-            if not isinstance(states, (list, tuple)):
-                states = [states]
-            else:
-                states = list(states)
+            states = to_list(states, allow_tuple=True)
             return [output] + states
         else:
             return output
@@ -702,8 +733,7 @@ class RNN(Layer):
                 K.set_value(self.states[0],
                             np.zeros((batch_size, self.cell.state_size)))
         else:
-            if not isinstance(states, (list, tuple)):
-                states = [states]
+            states = to_list(states, allow_tuple=True)
             if len(states) != len(self.states):
                 raise ValueError('Layer ' + self.name + ' expects ' +
                                  str(len(self.states)) + ' states, '
@@ -924,14 +954,19 @@ class SimpleRNNCell(Layer):
         config = {'units': self.units,
                   'activation': activations.serialize(self.activation),
                   'use_bias': self.use_bias,
-                  'kernel_initializer': initializers.serialize(self.kernel_initializer),
-                  'recurrent_initializer': initializers.serialize(self.recurrent_initializer),
+                  'kernel_initializer':
+                      initializers.serialize(self.kernel_initializer),
+                  'recurrent_initializer':
+                      initializers.serialize(self.recurrent_initializer),
                   'bias_initializer': initializers.serialize(self.bias_initializer),
-                  'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
-                  'recurrent_regularizer': regularizers.serialize(self.recurrent_regularizer),
+                  'kernel_regularizer':
+                      regularizers.serialize(self.kernel_regularizer),
+                  'recurrent_regularizer':
+                      regularizers.serialize(self.recurrent_regularizer),
                   'bias_regularizer': regularizers.serialize(self.bias_regularizer),
                   'kernel_constraint': constraints.serialize(self.kernel_constraint),
-                  'recurrent_constraint': constraints.serialize(self.recurrent_constraint),
+                  'recurrent_constraint':
+                      constraints.serialize(self.recurrent_constraint),
                   'bias_constraint': constraints.serialize(self.bias_constraint),
                   'dropout': self.dropout,
                   'recurrent_dropout': self.recurrent_dropout}
@@ -1129,15 +1164,21 @@ class SimpleRNN(RNN):
         config = {'units': self.units,
                   'activation': activations.serialize(self.activation),
                   'use_bias': self.use_bias,
-                  'kernel_initializer': initializers.serialize(self.kernel_initializer),
-                  'recurrent_initializer': initializers.serialize(self.recurrent_initializer),
+                  'kernel_initializer':
+                      initializers.serialize(self.kernel_initializer),
+                  'recurrent_initializer':
+                      initializers.serialize(self.recurrent_initializer),
                   'bias_initializer': initializers.serialize(self.bias_initializer),
-                  'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
-                  'recurrent_regularizer': regularizers.serialize(self.recurrent_regularizer),
+                  'kernel_regularizer':
+                      regularizers.serialize(self.kernel_regularizer),
+                  'recurrent_regularizer':
+                      regularizers.serialize(self.recurrent_regularizer),
                   'bias_regularizer': regularizers.serialize(self.bias_regularizer),
-                  'activity_regularizer': regularizers.serialize(self.activity_regularizer),
+                  'activity_regularizer':
+                      regularizers.serialize(self.activity_regularizer),
                   'kernel_constraint': constraints.serialize(self.kernel_constraint),
-                  'recurrent_constraint': constraints.serialize(self.recurrent_constraint),
+                  'recurrent_constraint':
+                      constraints.serialize(self.recurrent_constraint),
                   'bias_constraint': constraints.serialize(self.bias_constraint),
                   'dropout': self.dropout,
                   'recurrent_dropout': self.recurrent_dropout}
@@ -1165,7 +1206,7 @@ class GRUCell(Layer):
         recurrent_activation: Activation function to use
             for the recurrent step
             (see [activations](../activations.md)).
-            Default: hard sigmoid (`hard_sigmoid`).
+            Default: sigmoid (`sigmoid`).
             If you pass `None`, no activation is applied
             (ie. "linear" activation: `a(x) = x`).
         use_bias: Boolean, whether the layer uses a bias vector.
@@ -1213,7 +1254,7 @@ class GRUCell(Layer):
 
     def __init__(self, units,
                  activation='tanh',
-                 recurrent_activation='hard_sigmoid',
+                 recurrent_activation='sigmoid',
                  use_bias=True,
                  kernel_initializer='glorot_uniform',
                  recurrent_initializer='orthogonal',
@@ -1226,7 +1267,7 @@ class GRUCell(Layer):
                  bias_constraint=None,
                  dropout=0.,
                  recurrent_dropout=0.,
-                 implementation=1,
+                 implementation=2,
                  reset_after=False,
                  **kwargs):
         super(GRUCell, self).__init__(**kwargs)
@@ -1258,6 +1299,15 @@ class GRUCell(Layer):
 
     def build(self, input_shape):
         input_dim = input_shape[-1]
+
+        if isinstance(self.recurrent_initializer, initializers.Identity):
+            def recurrent_identity(shape, gain=1., dtype=None):
+                del dtype
+                return gain * np.concatenate(
+                    [np.identity(shape[0])] * (shape[1] // shape[0]), axis=1)
+
+            self.recurrent_initializer = recurrent_identity
+
         self.kernel = self.add_weight(shape=(input_dim, self.units * 3),
                                       name='kernel',
                                       initializer=self.kernel_initializer,
@@ -1313,7 +1363,8 @@ class GRUCell(Layer):
             # bias for hidden state - just for compatibility with CuDNN
             if self.reset_after:
                 self.recurrent_bias_z = self.recurrent_bias[:self.units]
-                self.recurrent_bias_r = self.recurrent_bias[self.units: self.units * 2]
+                self.recurrent_bias_r = (
+                    self.recurrent_bias[self.units: self.units * 2])
                 self.recurrent_bias_h = self.recurrent_bias[self.units * 2:]
         else:
             self.input_bias_z = None
@@ -1445,16 +1496,22 @@ class GRUCell(Layer):
     def get_config(self):
         config = {'units': self.units,
                   'activation': activations.serialize(self.activation),
-                  'recurrent_activation': activations.serialize(self.recurrent_activation),
+                  'recurrent_activation':
+                      activations.serialize(self.recurrent_activation),
                   'use_bias': self.use_bias,
-                  'kernel_initializer': initializers.serialize(self.kernel_initializer),
-                  'recurrent_initializer': initializers.serialize(self.recurrent_initializer),
+                  'kernel_initializer':
+                      initializers.serialize(self.kernel_initializer),
+                  'recurrent_initializer':
+                      initializers.serialize(self.recurrent_initializer),
                   'bias_initializer': initializers.serialize(self.bias_initializer),
-                  'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
-                  'recurrent_regularizer': regularizers.serialize(self.recurrent_regularizer),
+                  'kernel_regularizer':
+                      regularizers.serialize(self.kernel_regularizer),
+                  'recurrent_regularizer':
+                      regularizers.serialize(self.recurrent_regularizer),
                   'bias_regularizer': regularizers.serialize(self.bias_regularizer),
                   'kernel_constraint': constraints.serialize(self.kernel_constraint),
-                  'recurrent_constraint': constraints.serialize(self.recurrent_constraint),
+                  'recurrent_constraint':
+                      constraints.serialize(self.recurrent_constraint),
                   'bias_constraint': constraints.serialize(self.bias_constraint),
                   'dropout': self.dropout,
                   'recurrent_dropout': self.recurrent_dropout,
@@ -1486,7 +1543,7 @@ class GRU(RNN):
         recurrent_activation: Activation function to use
             for the recurrent step
             (see [activations](../activations.md)).
-            Default: hard sigmoid (`hard_sigmoid`).
+            Default: sigmoid (`sigmoid`).
             If you pass `None`, no activation is applied
             (ie. "linear" activation: `a(x) = x`).
         use_bias: Boolean, whether the layer uses a bias vector.
@@ -1551,16 +1608,20 @@ class GRU(RNN):
             True = "after" (CuDNN compatible).
 
     # References
-        - [Learning Phrase Representations using RNN Encoder-Decoder for Statistical Machine Translation](https://arxiv.org/abs/1406.1078)
-        - [On the Properties of Neural Machine Translation: Encoder-Decoder Approaches](https://arxiv.org/abs/1409.1259)
-        - [Empirical Evaluation of Gated Recurrent Neural Networks on Sequence Modeling](http://arxiv.org/abs/1412.3555v1)
-        - [A Theoretically Grounded Application of Dropout in Recurrent Neural Networks](http://arxiv.org/abs/1512.05287)
+        - [Learning Phrase Representations using RNN Encoder-Decoder for
+           Statistical Machine Translation](https://arxiv.org/abs/1406.1078)
+        - [On the Properties of Neural Machine Translation:
+           Encoder-Decoder Approaches](https://arxiv.org/abs/1409.1259)
+        - [Empirical Evaluation of Gated Recurrent Neural Networks on
+           Sequence Modeling](https://arxiv.org/abs/1412.3555v1)
+        - [A Theoretically Grounded Application of Dropout in
+           Recurrent Neural Networks](https://arxiv.org/abs/1512.05287)
     """
 
     @interfaces.legacy_recurrent_support
     def __init__(self, units,
                  activation='tanh',
-                 recurrent_activation='hard_sigmoid',
+                 recurrent_activation='sigmoid',
                  use_bias=True,
                  kernel_initializer='glorot_uniform',
                  recurrent_initializer='orthogonal',
@@ -1574,7 +1635,7 @@ class GRU(RNN):
                  bias_constraint=None,
                  dropout=0.,
                  recurrent_dropout=0.,
-                 implementation=1,
+                 implementation=2,
                  return_sequences=False,
                  return_state=False,
                  go_backwards=False,
@@ -1700,17 +1761,24 @@ class GRU(RNN):
     def get_config(self):
         config = {'units': self.units,
                   'activation': activations.serialize(self.activation),
-                  'recurrent_activation': activations.serialize(self.recurrent_activation),
+                  'recurrent_activation':
+                      activations.serialize(self.recurrent_activation),
                   'use_bias': self.use_bias,
-                  'kernel_initializer': initializers.serialize(self.kernel_initializer),
-                  'recurrent_initializer': initializers.serialize(self.recurrent_initializer),
+                  'kernel_initializer':
+                      initializers.serialize(self.kernel_initializer),
+                  'recurrent_initializer':
+                      initializers.serialize(self.recurrent_initializer),
                   'bias_initializer': initializers.serialize(self.bias_initializer),
-                  'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
-                  'recurrent_regularizer': regularizers.serialize(self.recurrent_regularizer),
+                  'kernel_regularizer':
+                      regularizers.serialize(self.kernel_regularizer),
+                  'recurrent_regularizer':
+                      regularizers.serialize(self.recurrent_regularizer),
                   'bias_regularizer': regularizers.serialize(self.bias_regularizer),
-                  'activity_regularizer': regularizers.serialize(self.activity_regularizer),
+                  'activity_regularizer':
+                      regularizers.serialize(self.activity_regularizer),
                   'kernel_constraint': constraints.serialize(self.kernel_constraint),
-                  'recurrent_constraint': constraints.serialize(self.recurrent_constraint),
+                  'recurrent_constraint':
+                      constraints.serialize(self.recurrent_constraint),
                   'bias_constraint': constraints.serialize(self.bias_constraint),
                   'dropout': self.dropout,
                   'recurrent_dropout': self.recurrent_dropout,
@@ -1740,7 +1808,7 @@ class LSTMCell(Layer):
         recurrent_activation: Activation function to use
             for the recurrent step
             (see [activations](../activations.md)).
-            Default: hard sigmoid (`hard_sigmoid`).
+            Default: sigmoid (`sigmoid`).
             If you pass `None`, no activation is applied
             (ie. "linear" activation: `a(x) = x`).x
         use_bias: Boolean, whether the layer uses a bias vector.
@@ -1756,7 +1824,8 @@ class LSTMCell(Layer):
         unit_forget_bias: Boolean.
             If True, add 1 to the bias of the forget gate at initialization.
             Setting it to true will also force `bias_initializer="zeros"`.
-            This is recommended in [Jozefowicz et al.](http://www.jmlr.org/proceedings/papers/v37/jozefowicz15.pdf)
+            This is recommended in [Jozefowicz et al. (2015)](
+            http://www.jmlr.org/proceedings/papers/v37/jozefowicz15.pdf).
         kernel_regularizer: Regularizer function applied to
             the `kernel` weights matrix
             (see [regularizer](../regularizers.md)).
@@ -1789,7 +1858,7 @@ class LSTMCell(Layer):
 
     def __init__(self, units,
                  activation='tanh',
-                 recurrent_activation='hard_sigmoid',
+                 recurrent_activation='sigmoid',
                  use_bias=True,
                  kernel_initializer='glorot_uniform',
                  recurrent_initializer='orthogonal',
@@ -1803,7 +1872,7 @@ class LSTMCell(Layer):
                  bias_constraint=None,
                  dropout=0.,
                  recurrent_dropout=0.,
-                 implementation=1,
+                 implementation=2,
                  **kwargs):
         super(LSTMCell, self).__init__(**kwargs)
         self.units = units
@@ -1834,6 +1903,15 @@ class LSTMCell(Layer):
 
     def build(self, input_shape):
         input_dim = input_shape[-1]
+
+        if type(self.recurrent_initializer).__name__ == 'Identity':
+            def recurrent_identity(shape, gain=1., dtype=None):
+                del dtype
+                return gain * np.concatenate(
+                    [np.identity(shape[0])] * (shape[1] // shape[0]), axis=1)
+
+            self.recurrent_initializer = recurrent_identity
+
         self.kernel = self.add_weight(shape=(input_dim, self.units * 4),
                                       name='kernel',
                                       initializer=self.kernel_initializer,
@@ -1848,6 +1926,7 @@ class LSTMCell(Layer):
 
         if self.use_bias:
             if self.unit_forget_bias:
+                @K.eager
                 def bias_initializer(_, *args, **kwargs):
                     return K.concatenate([
                         self.bias_initializer((self.units,), *args, **kwargs),
@@ -1870,8 +1949,10 @@ class LSTMCell(Layer):
         self.kernel_o = self.kernel[:, self.units * 3:]
 
         self.recurrent_kernel_i = self.recurrent_kernel[:, :self.units]
-        self.recurrent_kernel_f = self.recurrent_kernel[:, self.units: self.units * 2]
-        self.recurrent_kernel_c = self.recurrent_kernel[:, self.units * 2: self.units * 3]
+        self.recurrent_kernel_f = (
+            self.recurrent_kernel[:, self.units: self.units * 2])
+        self.recurrent_kernel_c = (
+            self.recurrent_kernel[:, self.units * 2: self.units * 3])
         self.recurrent_kernel_o = self.recurrent_kernel[:, self.units * 3:]
 
         if self.use_bias:
@@ -1977,17 +2058,23 @@ class LSTMCell(Layer):
     def get_config(self):
         config = {'units': self.units,
                   'activation': activations.serialize(self.activation),
-                  'recurrent_activation': activations.serialize(self.recurrent_activation),
+                  'recurrent_activation':
+                      activations.serialize(self.recurrent_activation),
                   'use_bias': self.use_bias,
-                  'kernel_initializer': initializers.serialize(self.kernel_initializer),
-                  'recurrent_initializer': initializers.serialize(self.recurrent_initializer),
+                  'kernel_initializer':
+                      initializers.serialize(self.kernel_initializer),
+                  'recurrent_initializer':
+                      initializers.serialize(self.recurrent_initializer),
                   'bias_initializer': initializers.serialize(self.bias_initializer),
                   'unit_forget_bias': self.unit_forget_bias,
-                  'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
-                  'recurrent_regularizer': regularizers.serialize(self.recurrent_regularizer),
+                  'kernel_regularizer':
+                      regularizers.serialize(self.kernel_regularizer),
+                  'recurrent_regularizer':
+                      regularizers.serialize(self.recurrent_regularizer),
                   'bias_regularizer': regularizers.serialize(self.bias_regularizer),
                   'kernel_constraint': constraints.serialize(self.kernel_constraint),
-                  'recurrent_constraint': constraints.serialize(self.recurrent_constraint),
+                  'recurrent_constraint':
+                      constraints.serialize(self.recurrent_constraint),
                   'bias_constraint': constraints.serialize(self.bias_constraint),
                   'dropout': self.dropout,
                   'recurrent_dropout': self.recurrent_dropout,
@@ -2009,7 +2096,7 @@ class LSTM(RNN):
         recurrent_activation: Activation function to use
             for the recurrent step
             (see [activations](../activations.md)).
-            Default: hard sigmoid (`hard_sigmoid`).
+            Default: sigmoid (`sigmoid`).
             If you pass `None`, no activation is applied
             (ie. "linear" activation: `a(x) = x`).
         use_bias: Boolean, whether the layer uses a bias vector.
@@ -2025,7 +2112,8 @@ class LSTM(RNN):
         unit_forget_bias: Boolean.
             If True, add 1 to the bias of the forget gate at initialization.
             Setting it to true will also force `bias_initializer="zeros"`.
-            This is recommended in [Jozefowicz et al.](http://www.jmlr.org/proceedings/papers/v37/jozefowicz15.pdf)
+            This is recommended in [Jozefowicz et al. (2015)](
+            http://www.jmlr.org/proceedings/papers/v37/jozefowicz15.pdf).
         kernel_regularizer: Regularizer function applied to
             the `kernel` weights matrix
             (see [regularizer](../regularizers.md)).
@@ -2060,7 +2148,8 @@ class LSTM(RNN):
         return_sequences: Boolean. Whether to return the last output
             in the output sequence, or the full sequence.
         return_state: Boolean. Whether to return the last state
-            in addition to the output.
+            in addition to the output. The returned elements of the
+            states list are the hidden state and the cell state, respectively.
         go_backwards: Boolean (default False).
             If True, process the input sequence backwards and return the
             reversed sequence.
@@ -2075,16 +2164,20 @@ class LSTM(RNN):
             Unrolling is only suitable for short sequences.
 
     # References
-        - [Long short-term memory](http://www.bioinf.jku.at/publications/older/2604.pdf) (original 1997 paper)
-        - [Learning to forget: Continual prediction with LSTM](http://www.mitpressjournals.org/doi/pdf/10.1162/089976600300015015)
-        - [Supervised sequence labeling with recurrent neural networks](http://www.cs.toronto.edu/~graves/preprint.pdf)
-        - [A Theoretically Grounded Application of Dropout in Recurrent Neural Networks](http://arxiv.org/abs/1512.05287)
+        - [Long short-term memory](
+          http://www.bioinf.jku.at/publications/older/2604.pdf)
+        - [Learning to forget: Continual prediction with LSTM](
+          http://www.mitpressjournals.org/doi/pdf/10.1162/089976600300015015)
+        - [Supervised sequence labeling with recurrent neural networks](
+          http://www.cs.toronto.edu/~graves/preprint.pdf)
+        - [A Theoretically Grounded Application of Dropout in
+           Recurrent Neural Networks](https://arxiv.org/abs/1512.05287)
     """
 
     @interfaces.legacy_recurrent_support
     def __init__(self, units,
                  activation='tanh',
-                 recurrent_activation='hard_sigmoid',
+                 recurrent_activation='sigmoid',
                  use_bias=True,
                  kernel_initializer='glorot_uniform',
                  recurrent_initializer='orthogonal',
@@ -2099,7 +2192,7 @@ class LSTM(RNN):
                  bias_constraint=None,
                  dropout=0.,
                  recurrent_dropout=0.,
-                 implementation=1,
+                 implementation=2,
                  return_sequences=False,
                  return_state=False,
                  go_backwards=False,
@@ -2224,18 +2317,25 @@ class LSTM(RNN):
     def get_config(self):
         config = {'units': self.units,
                   'activation': activations.serialize(self.activation),
-                  'recurrent_activation': activations.serialize(self.recurrent_activation),
+                  'recurrent_activation':
+                      activations.serialize(self.recurrent_activation),
                   'use_bias': self.use_bias,
-                  'kernel_initializer': initializers.serialize(self.kernel_initializer),
-                  'recurrent_initializer': initializers.serialize(self.recurrent_initializer),
+                  'kernel_initializer':
+                      initializers.serialize(self.kernel_initializer),
+                  'recurrent_initializer':
+                      initializers.serialize(self.recurrent_initializer),
                   'bias_initializer': initializers.serialize(self.bias_initializer),
                   'unit_forget_bias': self.unit_forget_bias,
-                  'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
-                  'recurrent_regularizer': regularizers.serialize(self.recurrent_regularizer),
+                  'kernel_regularizer':
+                      regularizers.serialize(self.kernel_regularizer),
+                  'recurrent_regularizer':
+                      regularizers.serialize(self.recurrent_regularizer),
                   'bias_regularizer': regularizers.serialize(self.bias_regularizer),
-                  'activity_regularizer': regularizers.serialize(self.activity_regularizer),
+                  'activity_regularizer':
+                      regularizers.serialize(self.activity_regularizer),
                   'kernel_constraint': constraints.serialize(self.kernel_constraint),
-                  'recurrent_constraint': constraints.serialize(self.recurrent_constraint),
+                  'recurrent_constraint':
+                      constraints.serialize(self.recurrent_constraint),
                   'bias_constraint': constraints.serialize(self.bias_constraint),
                   'dropout': self.dropout,
                   'recurrent_dropout': self.recurrent_dropout,

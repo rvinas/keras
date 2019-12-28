@@ -7,20 +7,17 @@ from keras import layers
 from keras.models import Model
 from keras.models import Sequential
 from keras.utils.test_utils import layer_test
-from keras.utils.test_utils import keras_test
 from keras import regularizers
 from keras import constraints
 from keras.layers import deserialize as deserialize_layer
 
 
-@keras_test
 def test_masking():
     layer_test(layers.Masking,
                kwargs={},
                input_shape=(3, 2, 3))
 
 
-@keras_test
 def test_dropout():
     layer_test(layers.Dropout,
                kwargs={'rate': 0.5},
@@ -61,7 +58,6 @@ def test_dropout():
                            input_shape=input_shape)
 
 
-@keras_test
 def test_activation():
     # with string argument
     layer_test(layers.Activation,
@@ -74,33 +70,23 @@ def test_activation():
                input_shape=(3, 2))
 
 
-@keras_test
-def test_reshape():
+@pytest.mark.parametrize('target_shape,input_shape',
+                         [((8, 1), (3, 2, 4)),
+                          ((-1, 1), (3, 2, 4)),
+                          ((1, -1), (3, 2, 4)),
+                          ((-1, 1), (None, None, 4))])
+def test_reshape(target_shape, input_shape):
     layer_test(layers.Reshape,
-               kwargs={'target_shape': (8, 1)},
-               input_shape=(3, 2, 4))
-
-    layer_test(layers.Reshape,
-               kwargs={'target_shape': (-1, 1)},
-               input_shape=(3, 2, 4))
-
-    layer_test(layers.Reshape,
-               kwargs={'target_shape': (1, -1)},
-               input_shape=(3, 2, 4))
-
-    layer_test(layers.Reshape,
-               kwargs={'target_shape': (-1, 1)},
-               input_shape=(None, None, 4))
+               kwargs={'target_shape': target_shape},
+               input_shape=input_shape)
 
 
-@keras_test
 def test_permute():
     layer_test(layers.Permute,
                kwargs={'dims': (2, 1)},
                input_shape=(3, 2, 4))
 
 
-@keras_test
 def test_flatten():
 
     def test_4d():
@@ -161,14 +147,12 @@ def test_flatten():
     test_5d()
 
 
-@keras_test
 def test_repeat_vector():
     layer_test(layers.RepeatVector,
                kwargs={'n': 3},
                input_shape=(3, 2))
 
 
-@keras_test
 def test_lambda():
     layer_test(layers.Lambda,
                kwargs={'function': lambda x: x + 1},
@@ -258,6 +242,18 @@ def test_lambda():
 
     test_multiple_outputs_no_mask()
 
+    def test_dtypes():
+        def func(x):
+            if K.dtype(x) != 'float16':
+                raise TypeError('x dtype is not float16, it is', K.dtype(x))
+            return x
+
+        i = layers.Input(shape=(3, 2, 1), dtype='float16')
+        o = layers.Lambda(func)
+        _ = o(i)
+        assert o._input_dtypes == 'float16'
+    test_dtypes()
+
     # test serialization with function
     def f(x):
         return x + 1
@@ -285,7 +281,6 @@ def test_lambda():
     ld = deserialize_layer({'class_name': 'Lambda', 'config': config})
 
 
-@keras_test
 @pytest.mark.skipif((K.backend() == 'theano'),
                     reason="theano cannot compute "
                            "the output shape automatically.")
@@ -295,7 +290,6 @@ def test_lambda_output_shape():
                input_shape=(3, 2, 4))
 
 
-@keras_test
 def test_dense():
     layer_test(layers.Dense,
                kwargs={'units': 3},
@@ -329,7 +323,6 @@ def test_dense():
     assert len(layer.losses) == 2
 
 
-@keras_test
 def test_activity_regularization():
     layer = layers.ActivityRegularization(l1=0.01, l2=0.01)
 
@@ -348,7 +341,6 @@ def test_activity_regularization():
     model.compile('rmsprop', 'mse')
 
 
-@keras_test
 def test_sequential_as_downstream_of_masking_layer():
 
     inputs = layers.Input(shape=(3, 4))

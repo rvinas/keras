@@ -43,10 +43,11 @@ class LocallyConnected1D(Layer):
             specifying the length of the 1D convolution window.
         strides: An integer or tuple/list of a single integer,
             specifying the stride length of the convolution.
-            Specifying any stride value != 1 is incompatible with specifying
-            any `dilation_rate` value != 1.
+            Specifying any `strides!=1` is incompatible with specifying
+            any `dilation_rate!=1`.
         padding: Currently only supports `"valid"` (case-insensitive).
             `"same"` may be supported in the future.
+        data_format: String, one of `channels_first`, `channels_last`.
         activation: Activation function to use
             (see [activations](../activations.md)).
             If you don't specify anything, no activation is applied
@@ -170,7 +171,8 @@ class LocallyConnected1D(Layer):
             'bias_initializer': initializers.serialize(self.bias_initializer),
             'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
             'bias_regularizer': regularizers.serialize(self.bias_regularizer),
-            'activity_regularizer': regularizers.serialize(self.activity_regularizer),
+            'activity_regularizer':
+                regularizers.serialize(self.activity_regularizer),
             'kernel_constraint': constraints.serialize(self.kernel_constraint),
             'bias_constraint': constraints.serialize(self.bias_constraint)
         }
@@ -188,12 +190,13 @@ class LocallyConnected2D(Layer):
 
     # Examples
     ```python
-        # apply a 3x3 unshared weights convolution with 64 output filters on a 32x32 image
-        # with `data_format="channels_last"`:
+        # apply a 3x3 unshared weights convolution with 64 output filters
+        # on a 32x32 image with `data_format="channels_last"`:
         model = Sequential()
         model.add(LocallyConnected2D(64, (3, 3), input_shape=(32, 32, 3)))
         # now model.output_shape == (None, 30, 30, 64)
-        # notice that this layer will consume (30*30)*(3*3*3*64) + (30*30)*64 parameters
+        # notice that this layer will consume (30*30)*(3*3*3*64)
+        # + (30*30)*64 parameters
 
         # add a 3x3 unshared weights convolution on top, with 32 output filters:
         model.add(LocallyConnected2D(32, (3, 3)))
@@ -247,9 +250,9 @@ class LocallyConnected2D(Layer):
 
     # Input shape
         4D tensor with shape:
-        `(samples, channels, rows, cols)` if data_format='channels_first'
+        `(samples, channels, rows, cols)` if `data_format='channels_first'`
         or 4D tensor with shape:
-        `(samples, rows, cols, channels)` if data_format='channels_last'.
+        `(samples, rows, cols, channels)` if `data_format='channels_last'`.
 
     # Output shape
         4D tensor with shape:
@@ -313,9 +316,10 @@ class LocallyConnected2D(Layer):
                                                    self.padding, self.strides[1])
         self.output_row = output_row
         self.output_col = output_col
-        self.kernel_shape = (output_row * output_col,
-                             self.kernel_size[0] * self.kernel_size[1] * input_filter,
-                             self.filters)
+        self.kernel_shape = (
+            output_row * output_col,
+            self.kernel_size[0] * self.kernel_size[1] * input_filter,
+            self.filters)
         self.kernel = self.add_weight(shape=self.kernel_shape,
                                       initializer=self.kernel_initializer,
                                       name='kernel',
@@ -380,7 +384,8 @@ class LocallyConnected2D(Layer):
             'bias_initializer': initializers.serialize(self.bias_initializer),
             'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
             'bias_regularizer': regularizers.serialize(self.bias_regularizer),
-            'activity_regularizer': regularizers.serialize(self.activity_regularizer),
+            'activity_regularizer':
+                regularizers.serialize(self.activity_regularizer),
             'kernel_constraint': constraints.serialize(self.kernel_constraint),
             'bias_constraint': constraints.serialize(self.bias_constraint)
         }

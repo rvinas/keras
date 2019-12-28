@@ -120,11 +120,13 @@ def serialize_keras_object(instance):
 def deserialize_keras_object(identifier, module_objects=None,
                              custom_objects=None,
                              printable_module_name='object'):
+    if identifier is None:
+        return None
     if isinstance(identifier, dict):
         # In this case we are dealing with a Keras config dictionary.
         config = identifier
         if 'class_name' not in config or 'config' not in config:
-            raise ValueError('Improper config format: ' + str(config))
+            raise ValueError('Improper config format: {}'.format(config))
         class_name = config['class_name']
         if custom_objects and class_name in custom_objects:
             cls = custom_objects[class_name]
@@ -134,8 +136,8 @@ def deserialize_keras_object(identifier, module_objects=None,
             module_objects = module_objects or {}
             cls = module_objects.get(class_name)
             if cls is None:
-                raise ValueError('Unknown ' + printable_module_name +
-                                 ': ' + class_name)
+                raise ValueError('Unknown {}: {}'.format(printable_module_name,
+                                                         class_name))
         if hasattr(cls, 'from_config'):
             custom_objects = custom_objects or {}
             if has_arg(cls.from_config, 'custom_objects'):
@@ -161,12 +163,12 @@ def deserialize_keras_object(identifier, module_objects=None,
         else:
             fn = module_objects.get(function_name)
             if fn is None:
-                raise ValueError('Unknown ' + printable_module_name +
-                                 ':' + function_name)
+                raise ValueError('Unknown {}: {}'.format(printable_module_name,
+                                                         function_name))
         return fn
     else:
-        raise ValueError('Could not interpret serialized ' +
-                         printable_module_name + ': ' + identifier)
+        raise ValueError('Could not interpret serialized '
+                         '{}: {}'.format(printable_module_name, identifier))
 
 
 def func_dump(func):
@@ -239,6 +241,33 @@ def func_load(code, defaults=None, closure=None, globs=None):
                                      name=code.co_name,
                                      argdefs=defaults,
                                      closure=closure)
+
+
+def getargspec(fn):
+    """Python 2/3 compatible `getargspec`.
+
+    Calls `getfullargspec` and assigns args, varargs,
+    varkw, and defaults to a python 2/3 compatible `ArgSpec`.
+    The parameter name 'varkw' is changed to 'keywords' to fit the
+    `ArgSpec` struct.
+
+    # Arguments
+        fn: the target function to inspect.
+
+    # Returns
+        An ArgSpec with args, varargs, keywords, and defaults parameters
+        from FullArgSpec.
+    """
+    if sys.version_info < (3,):
+        arg_spec = inspect.getargspec(fn)
+    else:
+        full_arg_spec = inspect.getfullargspec(fn)
+        arg_spec = inspect.ArgSpec(
+            args=full_arg_spec.args,
+            varargs=full_arg_spec.varargs,
+            keywords=full_arg_spec.varkw,
+            defaults=full_arg_spec.defaults)
+    return arg_spec
 
 
 def has_arg(fn, name, accept_all=False):
@@ -444,7 +473,7 @@ class Progbar(object):
         self.update(self._seen_so_far + n, values)
 
 
-def to_list(x):
+def to_list(x, allow_tuple=False):
     """Normalizes a list/tensor into a list.
 
     If a tensor is passed, we return
@@ -452,12 +481,18 @@ def to_list(x):
 
     # Arguments
         x: target object to be normalized.
+        allow_tuple: If False and x is a tuple,
+            it will be converted into a list
+            with a single element (the tuple).
+            Else converts the tuple to a list.
 
     # Returns
         A list.
     """
     if isinstance(x, list):
         return x
+    if allow_tuple and isinstance(x, tuple):
+        return list(x)
     return [x]
 
 
@@ -466,10 +501,10 @@ def unpack_singleton(x):
 
     Otherwise return the iterable.
 
-    # Argument:
+    # Argument
         x: A list or tuple.
 
-    # Returns:
+    # Returns
         The same iterable or the first element.
     """
     if len(x) == 1:
@@ -479,14 +514,11 @@ def unpack_singleton(x):
 
 def object_list_uid(object_list):
     object_list = to_list(object_list)
-    return ', '.join([str(abs(id(x))) for x in object_list])
+    return ', '.join((str(abs(id(x))) for x in object_list))
 
 
 def is_all_none(iterable_or_element):
-    if not isinstance(iterable_or_element, (list, tuple)):
-        iterable = [iterable_or_element]
-    else:
-        iterable = iterable_or_element
+    iterable = to_list(iterable_or_element, allow_tuple=True)
     for element in iterable:
         if element is not None:
             return False
@@ -581,3 +613,11 @@ def transpose_shape(shape, target_format, spatial_axes):
         raise ValueError('The `data_format` argument must be one of '
                          '"channels_first", "channels_last". Received: ' +
                          str(target_format))
+
+
+def check_for_unexpected_keys(name, input_dict, expected_values):
+    unknown = set(input_dict.keys()).difference(expected_values)
+    if unknown:
+        raise ValueError('Unknown entries in {} dictionary: {}. Only expected '
+                         'following keys: {}'.format(name, list(unknown),
+                                                     expected_values))

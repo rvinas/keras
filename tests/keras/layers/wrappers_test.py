@@ -2,7 +2,6 @@ import pytest
 import numpy as np
 import copy
 from numpy.testing import assert_allclose
-from keras.utils.test_utils import keras_test
 from keras.utils import CustomObjectScope
 from keras.layers import wrappers, Input, Layer
 from keras.layers import RNN
@@ -12,7 +11,6 @@ from keras import backend as K
 from keras.utils.generic_utils import object_list_uid, to_list
 
 
-@keras_test
 def test_TimeDistributed():
     # first, test with Dense layer
     model = Sequential()
@@ -127,7 +125,6 @@ def test_TimeDistributed():
     assert K.int_shape(td._input_map[uid]) == (None, 2)
 
 
-@keras_test
 @pytest.mark.skipif((K.backend() == 'cntk'),
                     reason='Flaky with CNTK backend')
 def test_TimeDistributed_learning_phase():
@@ -140,7 +137,6 @@ def test_TimeDistributed_learning_phase():
     assert_allclose(np.mean(y), 0., atol=1e-1, rtol=1e-1)
 
 
-@keras_test
 def test_TimeDistributed_trainable():
     # test layers that need learning_phase to be set
     x = Input(shape=(3, 2))
@@ -156,7 +152,6 @@ def test_TimeDistributed_trainable():
     assert len(layer.trainable_weights) == 2
 
 
-@keras_test
 @pytest.mark.skipif((K.backend() == 'cntk'),
                     reason='Unknown timestamps for RNN not supported in CNTK.')
 def test_TimeDistributed_with_masked_embedding_and_unspecified_shape():
@@ -188,7 +183,6 @@ def test_TimeDistributed_with_masked_embedding_and_unspecified_shape():
     assert mask_outputs[-1] is None  # final layer
 
 
-@keras_test
 def test_TimeDistributed_with_masking_layer():
     # test with Masking layer
     model = Sequential()
@@ -211,7 +205,6 @@ def test_TimeDistributed_with_masking_layer():
     assert np.array_equal(mask_outputs_val[1], np.any(model_input, axis=-1))
 
 
-@keras_test
 def test_regularizers():
     model = Sequential()
     model.add(wrappers.TimeDistributed(
@@ -231,7 +224,6 @@ def test_regularizers():
     assert len(model.losses) == 1
 
 
-@keras_test
 def test_Bidirectional():
     rnn = layers.SimpleRNN
     samples = 2
@@ -268,15 +260,6 @@ def test_Bidirectional():
         model.compile(loss='mse', optimizer='sgd')
         model.fit(x, y, epochs=1, batch_size=1)
 
-        # test with functional API
-        inputs = Input((timesteps, dim))
-        outputs = wrappers.Bidirectional(rnn(output_dim, dropout=dropout_rate,
-                                             recurrent_dropout=dropout_rate),
-                                         merge_mode=mode)(inputs)
-        model = Model(inputs, outputs)
-        model.compile(loss='mse', optimizer='sgd')
-        model.fit(x, y, epochs=1, batch_size=1)
-
         # Bidirectional and stateful
         inputs = Input(batch_shape=(1, timesteps, dim))
         outputs = wrappers.Bidirectional(rnn(output_dim, stateful=True),
@@ -286,7 +269,6 @@ def test_Bidirectional():
         model.fit(x, y, epochs=1, batch_size=1)
 
 
-@keras_test
 @pytest.mark.skipif((K.backend() == 'cntk'),
                     reason='Unknown timestamps not supported in CNTK.')
 def test_Bidirectional_dynamic_timesteps():
@@ -311,7 +293,6 @@ def test_Bidirectional_dynamic_timesteps():
         model.fit(x, y, epochs=1, batch_size=1)
 
 
-@keras_test
 @pytest.mark.parametrize('merge_mode', ['sum', 'mul', 'ave', 'concat', None])
 def test_Bidirectional_merged_value(merge_mode):
     rnn = layers.LSTM
@@ -337,9 +318,9 @@ def test_Bidirectional_merged_value(merge_mode):
     layer = wrappers.Bidirectional(rnn(units, return_sequences=True),
                                    merge_mode=merge_mode)
     f_merged = K.function([inputs], to_list(layer(inputs)))
-    f_forward = K.function([inputs], [layer.forward_layer.call(inputs)])
+    f_forward = K.function([inputs], [layer.forward_layer(inputs)])
     f_backward = K.function([inputs],
-                            [K.reverse(layer.backward_layer.call(inputs), 1)])
+                            [K.reverse(layer.backward_layer(inputs), 1)])
 
     y_merged = f_merged(X)
     y_expected = to_list(merge_func(f_forward(X)[0], f_backward(X)[0]))
@@ -352,8 +333,8 @@ def test_Bidirectional_merged_value(merge_mode):
     layer = wrappers.Bidirectional(rnn(units, return_state=True),
                                    merge_mode=merge_mode)
     f_merged = K.function([inputs], layer(inputs))
-    f_forward = K.function([inputs], layer.forward_layer.call(inputs))
-    f_backward = K.function([inputs], layer.backward_layer.call(inputs))
+    f_forward = K.function([inputs], layer.forward_layer(inputs))
+    f_backward = K.function([inputs], layer.backward_layer(inputs))
     n_states = len(layer.layer.states)
 
     y_merged = f_merged(X)
@@ -372,7 +353,6 @@ def test_Bidirectional_merged_value(merge_mode):
         assert_allclose(state_birnn, state_inner, atol=1e-5)
 
 
-@keras_test
 @pytest.mark.skipif(K.backend() == 'theano', reason='Not supported.')
 @pytest.mark.parametrize('merge_mode', ['sum', 'concat', None])
 def test_Bidirectional_dropout(merge_mode):
@@ -403,7 +383,6 @@ def test_Bidirectional_dropout(merge_mode):
         assert_allclose(x1, x2, atol=1e-5)
 
 
-@keras_test
 def test_Bidirectional_state_reuse():
     rnn = layers.LSTM
     samples = 2
@@ -431,7 +410,6 @@ def test_Bidirectional_state_reuse():
     outputs = model.predict(inputs)
 
 
-@keras_test
 def test_Bidirectional_with_constants():
     class RNNCellWithConstants(Layer):
         def __init__(self, units, **kwargs):
@@ -512,7 +490,6 @@ def test_Bidirectional_with_constants():
     assert_allclose(y_np, y_np_3, atol=1e-4)
 
 
-@keras_test
 def test_Bidirectional_with_constants_layer_passing_initial_state():
     class RNNCellWithConstants(Layer):
         def __init__(self, units, **kwargs):
@@ -603,7 +580,6 @@ def test_Bidirectional_with_constants_layer_passing_initial_state():
     assert_allclose(y_np, y_np_3, atol=1e-4)
 
 
-@keras_test
 def test_Bidirectional_trainable():
     # test layers that need learning_phase to be set
     x = Input(shape=(3, 2))
@@ -616,7 +592,6 @@ def test_Bidirectional_trainable():
     assert len(layer.trainable_weights) == 6
 
 
-@keras_test
 def test_Bidirectional_updates():
     x = Input(shape=(3, 2))
     layer = wrappers.Bidirectional(layers.SimpleRNN(3))
@@ -632,7 +607,6 @@ def test_Bidirectional_updates():
     assert len(layer.get_updates_for(x)) == 2
 
 
-@keras_test
 def test_Bidirectional_losses():
     x = Input(shape=(3, 2))
     layer = wrappers.Bidirectional(
